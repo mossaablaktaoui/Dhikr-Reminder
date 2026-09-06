@@ -1,120 +1,87 @@
 # dhakerni
 
-A desktop dhikr reminder for Linux. Shows random adhkar as desktop notifications on a configurable schedule.
+A small time-aware dhikr reminder for Linux.
 
 ## Requirements
 
 - Python 3
-- `notify-send` (`sudo apt install libnotify-bin` on Ubuntu/Debian)
-- systemd (for timer/scheduling)
+- `notify-send`
+- systemd user services
 
 ## Install
 
 ```bash
-make install
+chmod +x dhakerni
+./dhakerni install
 ```
 
-## Uninstall
+`install` copies the program to `~/.local/bin/dhakerni` and creates the user systemd timer. No separate installer or Makefile is required.
+
+## Time-aware behavior
+
+Default schedule:
+
+- `05:00 → 12:00`: morning
+- `12:00 → 17:00`: general
+- `17:00 → 23:00`: evening
+- `23:00 → 05:00`: quiet; no automatic notification
+
+The program uses the computer's current local time. Change the ranges with `dhakerni config --help`.
+
+## Commands
+
+```text
+dhakerni run
+dhakerni install
+dhakerni uninstall
+dhakerni add
+dhakerni remove
+dhakerni list
+dhakerni status
+dhakerni config
+```
+
+Every command has its own help:
 
 ```bash
-make uninstall
+dhakerni --help
+dhakerni run --help
+dhakerni install --help
+dhakerni config --help
 ```
-
-## Usage
-
-```
-dhakerni [command] [options]
-```
-
-### Commands
-
-| Command | Description |
-|---|---|
-| `run` | Show a random dhikr notification now |
-| `install` | Install systemd timer for recurring notifications |
-| `uninstall` | Remove systemd timer |
-| `add <text>` | Add a custom dhikr (optional: `--category`) |
-| `remove <id>` | Remove a custom dhikr by ID |
-| `list` | List all adhkar (optional: `--category`) |
-| `status` | Show timer status |
-| `config` | View or update settings |
-
-### Options
-
-| Flag | Description |
-|---|---|
-| `-c, --category` | Filter by category: morning, evening, sleep, wake, prayer, general |
-| `-i, --interval` | Time between reminders (e.g. `5m`, `30m`, `1h`) |
-| `-d, --duration` | Notification expiry time (e.g. `10s`, `30s`) |
-| `-h, --help` | Show help |
-| `-V, --version` | Show version |
 
 ## Examples
 
 ```bash
-# Show a random dhikr now
+# Show the time-appropriate dhikr now
 dhakerni run
 
-# Show a random morning dhikr
+# Manually override the time category
 dhakerni run -c morning
 
-# Install with 15 minute interval
+# Install/update with a 15-minute interval
 dhakerni install -i 15m
 
-# Install with custom notification duration
-dhakerni install -i 10m -d 20s
-
-# Add a custom dhikr
-dhakerni add "اللهم بارك لنا فيما رزقتنا" -c general
-
-# Add without category (appears in all)
-dhakerni add "دعاء خاص"
-
-# List all adhkar
-dhakerni list
-
-# List only evening adhkar
-dhakerni list -c evening
-
-# Remove a custom dhikr
-dhakerni remove 3
-
-# Check timer status
-dhakerni status
-
-# View config
-dhakerni config
-
-# Change defaults
+# Change the live timer interval later
 dhakerni config --set-interval 10m
-dhakerni config --set-duration 20s
-dhakerni config --set-category morning
+
+# Change time ranges
+dhakerni config \
+  --set-morning-start 05:30 \
+  --set-general-start 12:30 \
+  --set-evening-start 18:00 \
+  --set-quiet-start 23:30
+
+# Add/remove custom adhkar
+dhakerni add "سبحان الله" -c general
+dhakerni list
+dhakerni remove 1
+
+# Uninstall, keeping config
+dhakerni uninstall
+
+# Uninstall and remove config
+dhakerni uninstall --purge
 ```
 
-## Categories
-
-| Category | Arabic | Description |
-|---|---|---|
-| `morning` | أذكار الصباح | Morning adhkar |
-| `evening` | أذكار المساء | Evening adhkar |
-| `sleep` | أذكار النوم | Before sleep |
-| `wake` | أذكار الاستيقاظ | Upon waking |
-| `prayer` | أذكار الصلاة | After prayer |
-| `general` | أذكار عامة | General dhikr |
-
-## Config
-
-Settings are stored at `~/.config/dhakerni/`:
-
-- `config.json` — default interval, duration, and category
-- `dhkar.json` — custom adhkar list
-
-## Files
-
-```
-~/.local/bin/dhakerni              # the CLI script
-~/.config/dhakerni/config.json     # settings
-~/.config/dhakerni/dhkar.json      # custom adhkar
-~/.config/systemd/user/dhakerni.service
-~/.config/systemd/user/dhakerni.timer
-```
+Notifications contain only the dhikr text. The previous dhikr is remembered so it is not immediately repeated when alternatives exist.

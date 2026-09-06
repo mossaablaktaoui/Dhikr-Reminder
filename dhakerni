@@ -1,289 +1,284 @@
 #!/usr/bin/env python3
-"""dhakerni — A dhikr reminder CLI tool."""
+"""dhakerni — A small time-aware dhikr reminder for Linux."""
 
 import argparse
 import json
-import os
 import random
+import re
 import shutil
 import subprocess
 import sys
 import textwrap
+from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 CONFIG_DIR = Path.home() / ".config" / "dhakerni"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 ADHKAR_FILE = CONFIG_DIR / "adhkar.json"
+STATE_FILE = CONFIG_DIR / "state.json"
 
+BIN_DIR = Path.home() / ".local" / "bin"
+INSTALL_PATH = BIN_DIR / "dhakerni"
 SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
 SERVICE_FILE = SYSTEMD_DIR / "dhakerni.service"
 TIMER_FILE = SYSTEMD_DIR / "dhakerni.timer"
 
-CATEGORIES = ["morning", "evening", "sleep", "wake", "prayer", "general"]
-
+CATEGORIES = ("morning", "evening", "general")
 CATEGORY_LABELS = {
     "morning": "أذكار الصباح",
     "evening": "أذكار المساء",
-    "sleep": "أذكار النوم",
-    "wake": "أذكار الاستيقاظ",
-    "prayer": "أذكار الصلاة",
     "general": "أذكار عامة",
 }
 
-# fmt: off
+DEFAULT_CONFIG = {
+    "interval": "5m",
+    "duration": "10s",
+    "morning_start": "05:00",
+    "general_start": "12:00",
+    "evening_start": "17:00",
+    "quiet_start": "23:00",
+}
+
+# Kept intentionally small and free of decorative emoji.
 BUILT_IN_ADHKAR = {
     "morning": [
-        "☀️ أصبحنا وأصبح الملك لله",
-        "🌙 سبحان الله وبحمده",
-        "🤲 اللهم بك أصبحنا وبك أمسينا",
-        "🌿 سبحان الله الذي أحيانا بعد ما أماتنا وإليه النشور",
-        "✨ الحمد لله الذي أحيانا بعد ما أماتنا وإليه النشور",
-        "🛡️ اللهم صلِّ وسلم على نبينا محمد",
-        "🌟 أصبح الملك لله رب العالمين",
-        "🤍 اللهم إني أسألك خير هذا اليوم",
-        "💫 اللهم اجعل يومي خيراً من أمسى",
-        "🌸 اللهم بارك لنا في يومنا",
+        "أصبحنا وأصبح الملك لله والحمد لله، لا إله إلا الله وحده لا شريك له، له الملك وله الحمد وهو على كل شيء قدير",
+        "اللهم بك أصبحنا وبك أمسينا وبك نحيا وبك نموت وإليك النشور",
+        "رضيت بالله رباً وبالإسلام ديناً وبمحمد ﷺ نبياً",
+        "اللهم إني أسألك العفو والعافية في الدنيا والآخرة",
+        "حسبي الله لا إله إلا هو عليه توكلت وهو رب العرش العظيم",
     ],
     "evening": [
-        "🌙 أمسينا وأمسى الملك لله",
-        "🤲 اللهم بك أمسينا وبك أصبحنا",
-        "🌿 سبحان الله الذي أحيانا بعد ما أماتنا وإليه النشور",
-        "✨ الحمد لله الذي أحيانا بعد ما أماتنا وإليه النشور",
-        "🛡️ اللهم صلِّ وسلم على نبينا محمد",
-        "🌟 أمسى الملك لله رب العالمين",
-        "🤍 اللهم إني أسألك خير هذا المساء",
-        "💫 اللهم اجعل مسائي خيراً من أصلي",
-        "🌸 اللهم بارك لنا في مسائنا",
-        "💚 لا إله إلا الله وحده لا شريك له",
-    ],
-    "sleep": [
-        "🌙 باسمك اللهم أموت وأحيا",
-        "🤲 اللهم قني عذابك يوم تبعث عبادك",
-        "🛡️ سبحانك اللهم وبحمدك أستغفرك وأتوب إليك",
-        "🤍 اللهم اغفر ذنبي ووسّع لي في داري",
-        "✨ اللهم احفظني من عذابك يوم تبعث عبادك",
-        "🌟 اللهم أدخلني جنتك مع الأبرار",
-    ],
-    "wake": [
-        "☀️ الحمد لله الذي أحيانا بعد ما أماتنا وإليه النشور",
-        "🤲 سبحانك لا إله إلا أنت أعوذ برحمتك من عذابك",
-        "🌿 سبحانك سبحانك لا إله إلا أنت سبحانك إني كنت من الظالمين",
-        "✨ اللهم لا إله إلا أنت سبحانك إني كنت من الظالمين",
-    ],
-    "prayer": [
-        "🤲أستغفر الله", "🤲 اللهم اغفر لي وتب علي",
-        "🌟 سبحانك اللهم وبحمدك",
-        "🤍 ربنا تقبل منا إنك أنت السميع العليم",
-        "🌿 اللهم اجعل القرآن ربيع قلبي",
-        "💫 اللهم صلِّ وسلم على نبينا محمد",
-        "✨ اللهم لك الحمد كما ينبغي لجلال وجهك وعظيم سلطانك",
-        "🤲 اللهم أعني على ذكرك وشكرك وحسن عبادتك",
+        "أمسينا وأمسى الملك لله والحمد لله، لا إله إلا الله وحده لا شريك له، له الملك وله الحمد وهو على كل شيء قدير",
+        "اللهم بك أمسينا وبك أصبحنا وبك نحيا وبك نموت وإليك المصير",
+        "رضيت بالله رباً وبالإسلام ديناً وبمحمد ﷺ نبياً",
+        "اللهم إني أسألك العفو والعافية في الدنيا والآخرة",
+        "حسبي الله لا إله إلا هو عليه توكلت وهو رب العرش العظيم",
     ],
     "general": [
-        "🌿 سبحان الله",
-        "🤲 الحمد لله",
-        "✨ الله أكبر",
-        "🕋 لا إله إلا الله",
-        "💚 أستغفر الله",
-        "🌸 سبحان الله وبحمده",
-        "🌙 سبحان الله العظيم",
-        "🕊️ لا حول ولا قوة إلا بالله",
-        "🌟 اللهم صلِّ وسلم على نبينا محمد",
-        "🤍 رضيت بالله رباً وبالإسلام ديناً وبمحمد ﷺ نبياً",
-        "🤲 اللهم اغفر لي وارحمني",
-        "🌿 يا حي يا قيوم برحمتك أستغيث",
-        "🛡️ حسبي الله لا إله إلا هو",
-        "💫 اللهم إنك عفو تحب العفو فاعف عني",
-        "🌱 رب اغفر لي وتب علي",
-        "✨ سبحانك اللهم وبحمدك",
-        "🤲 اللهم أعني على ذكرك وشكرك وحسن عبادتك",
-        "🌊 لا إله إلا أنت سبحانك إني كنت من الظالمين",
-        "🌺 اللهم آتنا في الدنيا حسنة وفي الآخرة حسنة",
-        "🤍 ربنا تقبل منا إنك أنت السميع العليم",
-        "💚 لا إله إلا الله وحده لا شريك له",
-        "✨ له الملك وله الحمد وهو على كل شيء قدير",
-        "🤲 رب زدني علماً",
-        "🌿 رب اشرح لي صدري ويسر لي أمري",
-        "🕊️ اللهم اهدني وسددني",
-        "🌸 اللهم ارزقني حسن الخاتمة",
-        "💫 اللهم ثبت قلبي على دينك",
-        "🤍 اللهم طهر قلبي",
-        "🌱 اللهم بارك لي في وقتي وعملي",
-        "🛡️ أعوذ بكلمات الله التامات من شر ما خلق",
-        "🌟 اللهم إني أسألك العفو والعافية",
-        "🤲 اللهم إنك أنت السلام ومنك السلام",
-        "🕋 لا إله إلا الله الملك الحق المبين",
-        "🌿 سبحان الله والحمد لله ولا إله إلا الله والله أكبر",
-        "💚 أستغفر الله العظيم وأتوب إليه",
-        "✨ اللهم لك الحمد كما ينبغي لجلال وجهك وعظيم سلطانك",
-        "🌺 ربنا ظلمنا أنفسنا وإن لم تغفر لنا وترحمنا لنكونن من الخاسرين",
-        "🕊️ اللهم اجعل القرآن ربيع قلبي",
+        "سبحان الله",
+        "الحمد لله",
+        "الله أكبر",
+        "لا إله إلا الله",
+        "أستغفر الله",
+        "سبحان الله وبحمده",
+        "سبحان الله العظيم",
+        "لا حول ولا قوة إلا بالله",
+        "اللهم صل وسلم على نبينا محمد",
+        "سبحان الله والحمد لله ولا إله إلا الله والله أكبر",
+        "لا إله إلا أنت سبحانك إني كنت من الظالمين",
+        "رب اغفر لي وتب علي",
     ],
 }
-# fmt: on
+
+
+def fail(message):
+    print(f"Error: {message}", file=sys.stderr)
+    raise SystemExit(1)
 
 
 def ensure_config_dir():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_config():
+def read_json(path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"could not read {path}: {exc}")
+
+
+def write_json(path, value):
     ensure_config_dir()
-    if CONFIG_FILE.exists():
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    return {}
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_config():
+    raw = read_json(CONFIG_FILE, {})
+    config = DEFAULT_CONFIG.copy()
+    if isinstance(raw, dict):
+        for key in DEFAULT_CONFIG:
+            if key in raw:
+                config[key] = raw[key]
+    return config
 
 
 def save_config(config):
-    ensure_config_dir()
-    CONFIG_FILE.write_text(
-        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    write_json(CONFIG_FILE, {key: config[key] for key in DEFAULT_CONFIG})
 
 
 def load_custom_adhkar():
-    ensure_config_dir()
-    if ADHKAR_FILE.exists():
-        return json.loads(ADHKAR_FILE.read_text(encoding="utf-8"))
-    return []
+    entries = read_json(ADHKAR_FILE, [])
+    if not isinstance(entries, list):
+        fail(f"{ADHKAR_FILE} must contain a JSON list")
+
+    # Compatibility with old sleep/wake/prayer custom entries.
+    changed = False
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("category") not in CATEGORIES:
+            entry["category"] = "general"
+            changed = True
+    if changed:
+        write_json(ADHKAR_FILE, entries)
+    return entries
 
 
-def save_custom_adhkar(adhkar):
-    ensure_config_dir()
-    ADHKAR_FILE.write_text(
-        json.dumps(adhkar, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+def load_state():
+    state = read_json(STATE_FILE, {})
+    return state if isinstance(state, dict) else {}
 
 
-def get_all_adhkar(category=None):
-    result = []
-    categories = [category] if category else CATEGORIES
-    for cat in categories:
-        for text in BUILT_IN_ADHKAR.get(cat, []):
-            result.append({"text": text, "category": cat, "built_in": True})
-    for entry in load_custom_adhkar():
-        if category and entry.get("category") != category:
-            continue
-        result.append({**entry, "built_in": False})
-    return result
+def save_state(state):
+    write_json(STATE_FILE, state)
 
 
-def parse_duration(s):
-    s = s.strip().lower()
-    if s.endswith("s"):
-        return int(s[:-1])
-    if s.endswith("m"):
-        return int(s[:-1]) * 60
-    if s.endswith("h"):
-        return int(s[:-1]) * 3600
-    try:
-        return int(s)
-    except ValueError:
+def parse_duration(value):
+    if not isinstance(value, str):
         return None
+    match = re.fullmatch(r"\s*(\d+)\s*([smh]?)\s*", value.lower())
+    if not match:
+        return None
+    amount = int(match.group(1))
+    if amount <= 0:
+        return None
+    multiplier = {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+    return amount * multiplier
 
 
 def format_duration(seconds):
-    if seconds >= 3600:
-        h = seconds // 3600
-        m = (seconds % 3600) // 60
-        return f"{h}h{m}m" if m else f"{h}h"
-    if seconds >= 60:
-        m = seconds // 60
-        s = seconds % 60
-        return f"{m}m{s}s" if s else f"{m}m"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
     return f"{seconds}s"
 
 
-def notify(message, duration_sec=10):
-    if not shutil.which("notify-send"):
-        print("Error: notify-send is not installed.", file=sys.stderr)
-        print("On Ubuntu/Debian: sudo apt install libnotify-bin", file=sys.stderr)
-        sys.exit(1)
+def parse_clock(value):
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except (TypeError, ValueError):
+        return None
+    return parsed.hour * 60 + parsed.minute
+
+
+def validate_schedule(config):
+    keys = ("morning_start", "general_start", "evening_start", "quiet_start")
+    values = []
+    for key in keys:
+        minutes = parse_clock(config.get(key))
+        if minutes is None:
+            fail(f"invalid time for {key}: {config.get(key)!r}; use HH:MM")
+        values.append(minutes)
+    if values != sorted(values) or len(set(values)) != len(values):
+        fail("time ranges must be ordered: morning < general < evening < quiet")
+
+
+def current_period(config, now=None):
+    validate_schedule(config)
+    now = now or datetime.now().astimezone()
+    minute = now.hour * 60 + now.minute
+
+    morning = parse_clock(config["morning_start"])
+    general = parse_clock(config["general_start"])
+    evening = parse_clock(config["evening_start"])
+    quiet = parse_clock(config["quiet_start"])
+
+    if minute < morning or minute >= quiet:
+        return "quiet"
+    if minute < general:
+        return "morning"
+    if minute < evening:
+        return "general"
+    return "evening"
+
+
+def get_all_adhkar(category):
+    result = [
+        {"text": text, "category": category, "built_in": True}
+        for text in BUILT_IN_ADHKAR.get(category, [])
+    ]
+    for entry in load_custom_adhkar():
+        if not isinstance(entry, dict) or entry.get("category") != category:
+            continue
+        text = str(entry.get("text", "")).strip()
+        if text:
+            result.append({**entry, "text": text, "built_in": False})
+    return result
+
+
+def choose_adhkar(category):
+    adhkar = get_all_adhkar(category)
+    if not adhkar:
+        fail(f"no adhkar found for category '{category}'")
+
+    last_text = load_state().get("last_text")
+    choices = [entry for entry in adhkar if entry["text"] != last_text]
+    if not choices:
+        choices = adhkar
+
+    chosen = random.choice(choices)
+    save_state({"last_text": chosen["text"]})
+    return chosen["text"]
+
+
+def notify(message, duration_sec):
+    notify_send = shutil.which("notify-send")
+    if not notify_send:
+        fail("notify-send is not installed")
+
+    # A single positional string becomes the notification summary: no separate
+    # title, body, explicit icon, or decorative image.
     subprocess.run(
         [
-            "notify-send",
+            notify_send,
             "--app-name=dhakerni",
             "--urgency=normal",
             f"--expire-time={duration_sec * 1000}",
-            "--icon=dialog-information",
-            "ذِكر",
             message,
         ],
         check=True,
     )
 
 
-# ── CLI commands ──────────────────────────────────────────────────────────────
-
-
-def cmd_run(args):
-    config = load_config()
-    interval = parse_duration(args.interval) if args.interval else None
-    duration = parse_duration(args.duration or config.get("duration", "10s"))
-    if duration is None:
-        print(f"Invalid duration: {args.duration}", file=sys.stderr)
-        sys.exit(1)
-
-    category = args.category or config.get("default_category")
-    adhkar = get_all_adhkar(category)
-    if not adhkar:
-        print(f"No adhkar found for category '{category}'.", file=sys.stderr)
-        sys.exit(1)
-
-    chosen = random.choice(adhkar)
-    notify(chosen["text"], duration)
-
-
-def cmd_install(args):
+def systemctl(*args, check=True, capture_output=False):
     if not shutil.which("systemctl"):
-        print("Error: systemctl is not available.", file=sys.stderr)
-        sys.exit(1)
+        fail("systemctl is not available")
+    return subprocess.run(
+        ["systemctl", "--user", *args],
+        check=check,
+        capture_output=capture_output,
+        text=True,
+    )
 
-    config = load_config()
 
-    if args.interval:
-        parsed = parse_duration(args.interval)
-        if parsed is None:
-            print(f"Invalid interval: {args.interval}", file=sys.stderr)
-            sys.exit(1)
-        config["interval"] = args.interval
-    if args.duration:
-        parsed = parse_duration(args.duration)
-        if parsed is None:
-            print(f"Invalid duration: {args.duration}", file=sys.stderr)
-            sys.exit(1)
-        config["duration"] = args.duration
-
-    save_config(config)
-
-    interval_str = config.get("interval", "5m")
-    interval_sec = parse_duration(interval_str)
-    interval_human = format_duration(interval_sec)
-
-    script_path = Path(__file__).resolve()
+def write_systemd_units(config):
+    interval_sec = parse_duration(config["interval"])
+    if interval_sec is None:
+        fail(f"invalid interval: {config['interval']}")
 
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
-
     SERVICE_FILE.write_text(
-        textwrap.dedent(f"""\
+        textwrap.dedent("""\
             [Unit]
-            Description=Dhikr reminder notification
+            Description=Dhakerni dhikr reminder
 
             [Service]
             Type=oneshot
-            ExecStart={script_path} run
+            ExecStart=%h/.local/bin/dhakerni run
         """),
         encoding="utf-8",
     )
-
     TIMER_FILE.write_text(
         textwrap.dedent(f"""\
             [Unit]
-            Description=Dhikr reminder every {interval_human}
+            Description=Dhakerni reminder every {format_duration(interval_sec)}
 
             [Timer]
             OnBootSec=30s
@@ -297,256 +292,248 @@ def cmd_install(args):
         encoding="utf-8",
     )
 
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "enable", "dhakerni.timer"], check=True)
-    subprocess.run(["systemctl", "--user", "start", "dhakerni.timer"], check=True)
 
-    print(f"✅ dhakerni installed successfully.")
-    print(f"   Interval: every {interval_human}")
-    print(f"   Notification duration: {config.get('duration', '10s')}")
-    print()
-    print("Commands:")
-    print("  Run now:       dhakerni run")
-    print("  Check status:  dhakerni status")
-    print("  Uninstall:     dhakerni uninstall")
+def timer_installed():
+    return SERVICE_FILE.exists() and TIMER_FILE.exists()
+
+
+def refresh_timer(config, restart=True):
+    write_systemd_units(config)
+    systemctl("daemon-reload")
+    if restart:
+        result = systemctl("is-active", "dhakerni.timer", check=False, capture_output=True)
+        if result.stdout.strip() == "active":
+            systemctl("restart", "dhakerni.timer")
+
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+
+def cmd_run(args):
+    config = load_config()
+    validate_schedule(config)
+
+    duration_text = args.duration or config["duration"]
+    duration = parse_duration(duration_text)
+    if duration is None:
+        fail(f"invalid duration: {duration_text}")
+
+    category = args.category or current_period(config)
+    if category == "quiet":
+        if sys.stdout.isatty():
+            print("Quiet hours: no notification shown.")
+        return
+
+    notify(choose_adhkar(category), duration)
+
+
+def cmd_install(args):
+    if not shutil.which("systemctl"):
+        fail("systemctl is not available")
+    if not shutil.which("notify-send"):
+        fail("notify-send is not installed")
+
+    config = load_config()
+    if args.interval:
+        if parse_duration(args.interval) is None:
+            fail(f"invalid interval: {args.interval}")
+        config["interval"] = args.interval
+    if args.duration:
+        if parse_duration(args.duration) is None:
+            fail(f"invalid duration: {args.duration}")
+        config["duration"] = args.duration
+    save_config(config)
+
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    source = Path(__file__).resolve()
+    if source != INSTALL_PATH.resolve(strict=False):
+        shutil.copy2(source, INSTALL_PATH)
+    INSTALL_PATH.chmod(0o755)
+
+    write_systemd_units(config)
+    systemctl("daemon-reload")
+    systemctl("enable", "--now", "dhakerni.timer")
+
+    print(f"Installed: {INSTALL_PATH}")
+    print(f"Interval: {config['interval']}")
 
 
 def cmd_uninstall(args):
-    if not shutil.which("systemctl"):
-        print("Error: systemctl is not available.", file=sys.stderr)
-        sys.exit(1)
+    if shutil.which("systemctl"):
+        systemctl("disable", "--now", "dhakerni.timer", check=False)
+        SERVICE_FILE.unlink(missing_ok=True)
+        TIMER_FILE.unlink(missing_ok=True)
+        systemctl("daemon-reload", check=False)
+    else:
+        SERVICE_FILE.unlink(missing_ok=True)
+        TIMER_FILE.unlink(missing_ok=True)
 
-    subprocess.run(["systemctl", "--user", "stop", "dhakerni.timer"], check=False)
-    subprocess.run(
-        ["systemctl", "--user", "disable", "dhakerni.timer"], check=False
-    )
+    INSTALL_PATH.unlink(missing_ok=True)
 
-    SERVICE_FILE.unlink(missing_ok=True)
-    TIMER_FILE.unlink(missing_ok=True)
+    if args.purge:
+        shutil.rmtree(CONFIG_DIR, ignore_errors=True)
 
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-
-    print("✅ dhakerni uninstalled.")
-    print("   Timer stopped and removed.")
-    print("   Config files kept at ~/.config/dhakerni/")
-    print("   To remove config: rm -rf ~/.config/dhakerni")
+    print("Uninstalled dhakerni." + (" Config removed." if args.purge else " Config kept."))
 
 
 def cmd_add(args):
-    text = " ".join(args.text)
-    if not text.strip():
-        print("Error: dhikr text cannot be empty.", file=sys.stderr)
-        sys.exit(1)
-
-    category = args.category or "general"
-    if category not in CATEGORIES:
-        print(
-            f"Error: unknown category '{category}'. "
-            f"Valid categories: {', '.join(CATEGORIES)}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    text = " ".join(args.text).strip()
+    if not text:
+        fail("dhikr text cannot be empty")
 
     custom = load_custom_adhkar()
-    next_id = 1
-    if custom:
-        next_id = max(e.get("id", 0) for e in custom) + 1
-
-    entry = {"id": next_id, "text": text, "category": category}
-    custom.append(entry)
-    save_custom_adhkar(custom)
-
-    print(f"✅ Added dhikr #{next_id} to '{category}':")
-    print(f"   {text}")
+    next_id = max((int(e.get("id", 0)) for e in custom if isinstance(e, dict)), default=0) + 1
+    custom.append({"id": next_id, "text": text, "category": args.category})
+    write_json(ADHKAR_FILE, custom)
+    print(f"Added #{next_id} to {args.category}.")
 
 
 def cmd_remove(args):
     custom = load_custom_adhkar()
-    target_id = args.id
-
-    new_list = [e for e in custom if e.get("id") != target_id]
+    new_list = [e for e in custom if not isinstance(e, dict) or e.get("id") != args.id]
     if len(new_list) == len(custom):
-        print(f"Error: no custom dhikr with ID #{target_id}.", file=sys.stderr)
-        print("Use 'dhakerni list' to see available IDs.", file=sys.stderr)
-        sys.exit(1)
-
-    save_custom_adhkar(new_list)
-    print(f"✅ Removed custom dhikr #{target_id}.")
+        fail(f"no custom dhikr with ID #{args.id}")
+    write_json(ADHKAR_FILE, new_list)
+    print(f"Removed #{args.id}.")
 
 
 def cmd_list(args):
-    config = load_config()
-    category = args.category or config.get("default_category")
-    adhkar = get_all_adhkar(category)
-
-    if not adhkar:
-        print("No adhkar found.")
-        return
-
-    current_cat = None
-    for entry in adhkar:
-        cat = entry["category"]
-        if cat != current_cat:
-            current_cat = cat
-            label = CATEGORY_LABELS.get(cat, cat)
-            print(f"\n── {label} ({cat}) ──")
-        tag = "" if entry["built_in"] else " [custom]"
-        print(f"  {entry['text']}{tag}")
-
-    custom = load_custom_adhkar()
-    built_in_count = sum(
-        len(v) for v in BUILT_IN_ADHKAR.values()
-    )
-    print(f"\n{built_in_count} built-in, {len(custom)} custom")
+    categories = [args.category] if args.category else list(CATEGORIES)
+    for category in categories:
+        print(f"\n{CATEGORY_LABELS[category]} ({category})")
+        for entry in get_all_adhkar(category):
+            if entry["built_in"]:
+                print(f"  {entry['text']}")
+            else:
+                print(f"  #{entry.get('id', '?')} [custom] {entry['text']}")
 
 
 def cmd_status(args):
-    if not shutil.which("systemctl"):
-        print("Error: systemctl is not available.", file=sys.stderr)
-        sys.exit(1)
+    config = load_config()
+    period = current_period(config)
+    local_now = datetime.now().astimezone()
 
-    result = subprocess.run(
-        ["systemctl", "--user", "is-active", "dhakerni.timer"],
-        capture_output=True,
-        text=True,
-    )
-    is_active = result.stdout.strip() == "active"
+    active = False
+    if shutil.which("systemctl"):
+        result = systemctl("is-active", "dhakerni.timer", check=False, capture_output=True)
+        active = result.stdout.strip() == "active"
 
-    if is_active:
-        print("✅ dhakerni timer is active")
-        subprocess.run(
-            ["systemctl", "--user", "status", "dhakerni.timer", "--no-pager"],
-            check=False,
-        )
-    else:
-        print("⏸️  dhakerni timer is not active")
-        print("   Install with: dhakerni install")
+    print(f"Timer: {'active' if active else 'inactive'}")
+    print(f"Installed: {'yes' if INSTALL_PATH.exists() and timer_installed() else 'no'}")
+    print(f"Local time: {local_now.strftime('%H:%M %Z')}")
+    print(f"Current period: {period}")
+    print(f"Interval: {config['interval']}")
+
+    if args.full and shutil.which("systemctl"):
+        systemctl("status", "dhakerni.timer", "--no-pager", check=False)
 
 
 def cmd_config(args):
     config = load_config()
+    was_installed = timer_installed()
+    changed = False
+    interval_changed = False
 
-    if args.set_interval:
-        parsed = parse_duration(args.set_interval)
-        if parsed is None:
-            print(f"Invalid interval: {args.set_interval}", file=sys.stderr)
-            sys.exit(1)
-        config["interval"] = args.set_interval
+    updates = {
+        "interval": args.set_interval,
+        "duration": args.set_duration,
+        "morning_start": args.set_morning_start,
+        "general_start": args.set_general_start,
+        "evening_start": args.set_evening_start,
+        "quiet_start": args.set_quiet_start,
+    }
+
+    if updates["interval"] is not None:
+        if parse_duration(updates["interval"]) is None:
+            fail(f"invalid interval: {updates['interval']}")
+        interval_changed = updates["interval"] != config["interval"]
+    if updates["duration"] is not None and parse_duration(updates["duration"]) is None:
+        fail(f"invalid duration: {updates['duration']}")
+
+    for key in ("morning_start", "general_start", "evening_start", "quiet_start"):
+        if updates[key] is not None and parse_clock(updates[key]) is None:
+            fail(f"invalid time: {updates[key]}; use HH:MM")
+
+    for key, value in updates.items():
+        if value is not None:
+            config[key] = value
+            changed = True
+
+    if args.reset:
+        config = DEFAULT_CONFIG.copy()
+        changed = True
+        interval_changed = True
+
+    validate_schedule(config)
+
+    if changed:
         save_config(config)
-        print(f"✅ Default interval set to {args.set_interval}")
+        if was_installed and interval_changed:
+            refresh_timer(config, restart=True)
+        print("Config updated.")
 
-    if args.set_duration:
-        parsed = parse_duration(args.set_duration)
-        if parsed is None:
-            print(f"Invalid duration: {args.set_duration}", file=sys.stderr)
-            sys.exit(1)
-        config["duration"] = args.set_duration
-        save_config(config)
-        print(f"✅ Default notification duration set to {args.set_duration}")
-
-    if args.set_category:
-        cat = args.set_category
-        if cat not in CATEGORIES:
-            print(
-                f"Error: unknown category '{cat}'. "
-                f"Valid categories: {', '.join(CATEGORIES)}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        config["default_category"] = cat
-        save_config(config)
-        print(f"✅ Default category set to '{cat}'")
-
-    if not any([args.set_interval, args.set_duration, args.set_category]):
-        if not config:
-            print("No config found. Using defaults:")
-        else:
-            print("Current config:")
-        print(f"  Interval:    {config.get('interval', '5m')}")
-        print(f"  Duration:    {config.get('duration', '10s')}")
-        print(f"  Category:    {config.get('default_category', 'all')}")
-        print()
-        print("Update with:")
-        print("  dhakerni config --set-interval 10m")
-        print("  dhakerni config --set-duration 20s")
-        print("  dhakerni config --set-category morning")
+    if args.show or not changed:
+        print(f"Interval:      {config['interval']}")
+        print(f"Duration:      {config['duration']}")
+        print(f"Morning:       {config['morning_start']} → {config['general_start']}")
+        print(f"General:       {config['general_start']} → {config['evening_start']}")
+        print(f"Evening:       {config['evening_start']} → {config['quiet_start']}")
+        print(f"Quiet:         {config['quiet_start']} → {config['morning_start']}")
 
 
-# ── Argument parser ───────────────────────────────────────────────────────────
+# ── Parser ──────────────────────────────────────────────────────────────────
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="dhakerni",
-        description="ذِكر — A dhikr reminder for your desktop",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent("""\
-            categories:
-              morning   أذكار الصباح      evening  أذكار المساء
-              sleep     أذكار النوم        wake     أذكار الاستيقاظ
-              prayer    أذكار الصلاة       general  أذكار عامة
-
-            examples:
-              dhakerni run                        random dhikr notification
-              dhakerni run -c morning             random morning dhikr
-              dhakerni install -i 15m             install timer every 15 min
-              dhakerni add "دعاء" -c prayer       add custom dhikr
-              dhakerni list -c evening            list evening adhkar
-              dhakerni config --set-interval 10m  change default interval
-        """),
+        description="A time-aware desktop dhikr reminder for Linux.",
+        epilog="Use 'dhakerni COMMAND --help' for command-specific help.",
     )
     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {VERSION}")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    sub = parser.add_subparsers(dest="command")
+    p = sub.add_parser("run", help="show one dhikr using the current local time")
+    p.add_argument("-c", "--category", choices=CATEGORIES, help="override automatic time category")
+    p.add_argument("-d", "--duration", metavar="TIME", help="override notification duration, e.g. 10s")
+    p.set_defaults(func=cmd_run)
 
-    # run
-    p_run = sub.add_parser("run", help="Show a random dhikr notification")
-    p_run.add_argument("-c", "--category", choices=CATEGORIES, help="Filter by category")
-    p_run.add_argument("-i", "--interval", help="Override interval (not used for one-shot)")
-    p_run.add_argument("-d", "--duration", help="Notification expiry time (e.g. 10s, 30s)")
-    p_run.set_defaults(func=cmd_run)
+    p = sub.add_parser("install", help="install/update dhakerni and its user timer")
+    p.add_argument("-i", "--interval", metavar="TIME", help="reminder interval, e.g. 5m, 1h")
+    p.add_argument("-d", "--duration", metavar="TIME", help="notification duration, e.g. 10s")
+    p.set_defaults(func=cmd_install)
 
-    # install
-    p_install = sub.add_parser("install", help="Install systemd timer")
-    p_install.add_argument("-i", "--interval", help="Time between reminders (e.g. 5m, 1h)")
-    p_install.add_argument("-d", "--duration", help="Notification expiry time (e.g. 10s)")
-    p_install.set_defaults(func=cmd_install)
+    p = sub.add_parser("uninstall", help="remove dhakerni and its user timer")
+    p.add_argument("--purge", action="store_true", help="also remove ~/.config/dhakerni")
+    p.set_defaults(func=cmd_uninstall)
 
-    # uninstall
-    p_uninstall = sub.add_parser("uninstall", help="Remove systemd timer")
-    p_uninstall.set_defaults(func=cmd_uninstall)
+    p = sub.add_parser("add", help="add a custom dhikr")
+    p.add_argument("text", nargs="+", help="dhikr text")
+    p.add_argument("-c", "--category", choices=CATEGORIES, default="general", help="category (default: general)")
+    p.set_defaults(func=cmd_add)
 
-    # add
-    p_add = sub.add_parser("add", help="Add a custom dhikr")
-    p_add.add_argument("text", nargs="+", help="Dhikr text")
-    p_add.add_argument("-c", "--category", choices=CATEGORIES, help="Assign category")
-    p_add.set_defaults(func=cmd_add)
+    p = sub.add_parser("remove", help="remove a custom dhikr by ID")
+    p.add_argument("id", type=int, help="custom ID shown by 'dhakerni list'")
+    p.set_defaults(func=cmd_remove)
 
-    # remove
-    p_remove = sub.add_parser("remove", help="Remove a custom dhikr by ID")
-    p_remove.add_argument("id", type=int, help="Dhikr ID (see 'dhakerni list')")
-    p_remove.set_defaults(func=cmd_remove)
+    p = sub.add_parser("list", help="list built-in and custom adhkar")
+    p.add_argument("-c", "--category", choices=CATEGORIES, help="show one category only")
+    p.set_defaults(func=cmd_list)
 
-    # list
-    p_list = sub.add_parser("list", help="List all adhkar")
-    p_list.add_argument("-c", "--category", choices=CATEGORIES, help="Filter by category")
-    p_list.set_defaults(func=cmd_list)
+    p = sub.add_parser("status", help="show timer and current time-period status")
+    p.add_argument("--full", action="store_true", help="also show full systemd timer status")
+    p.set_defaults(func=cmd_status)
 
-    # status
-    p_status = sub.add_parser("status", help="Show timer status")
-    p_status.set_defaults(func=cmd_status)
-
-    # config
-    p_config = sub.add_parser("config", help="View or update settings")
-    p_config.add_argument("--set-interval", metavar="TIME", help="Set default interval")
-    p_config.add_argument("--set-duration", metavar="TIME", help="Set default notification duration")
-    p_config.add_argument(
-        "--set-category",
-        metavar="CAT",
-        choices=CATEGORIES,
-        help="Set default category",
-    )
-    p_config.set_defaults(func=cmd_config)
+    p = sub.add_parser("config", help="view or update settings")
+    p.add_argument("--show", action="store_true", help="show config after applying changes")
+    p.add_argument("--reset", action="store_true", help="restore default settings")
+    p.add_argument("--set-interval", metavar="TIME", help="set interval, e.g. 10m")
+    p.add_argument("--set-duration", metavar="TIME", help="set notification duration, e.g. 10s")
+    p.add_argument("--set-morning-start", metavar="HH:MM", help="start of morning period")
+    p.add_argument("--set-general-start", metavar="HH:MM", help="start of general period")
+    p.add_argument("--set-evening-start", metavar="HH:MM", help="start of evening period")
+    p.add_argument("--set-quiet-start", metavar="HH:MM", help="start of quiet period")
+    p.set_defaults(func=cmd_config)
 
     return parser
 
@@ -554,11 +541,9 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
-
     if not args.command:
         parser.print_help()
-        sys.exit(0)
-
+        return
     args.func(args)
 
 
